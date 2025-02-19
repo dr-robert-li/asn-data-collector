@@ -43,3 +43,6 @@ Thumbs.db
 *.log
 *.csv
 *.json
+*.xml
+*.txt
+!requirements.txt
