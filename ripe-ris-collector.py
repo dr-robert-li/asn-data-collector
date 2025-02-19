@@ -7,6 +7,8 @@ import time
 import socket
 import subprocess
 import re
+import os
+from typing import Dict, List, Tuple
 
 # File paths and configuration
 INPUT_FILE = 'unique-ips.log'
@@ -117,11 +119,11 @@ def query_rir_api(endpoint, subnet):
 def get_route_data(subnet):
     # Try Team Cymru first
     cymru_data = query_team_cymru(subnet)
-    if cymru_data:
-        print(f"  → Found data via Team Cymru")
+    if cymru_data and cymru_data['data']['asns'][0]['asn'].upper() != 'NA':
+        print(f"  → Found valid data via Team Cymru")
         return cymru_data
 
-    # Try each RIR's APIs as fallback
+    # Try each RIR's APIs if Team Cymru returned NA or failed
     print(f"  → Trying RIR APIs...")
     for rir, endpoints in ROUTING_APIS.items():
         for endpoint in endpoints:
@@ -175,21 +177,35 @@ def get_asn_info(asn):
     return {'data': {}}
 
 def process_routes(check_missing=False):
-    df = pd.DataFrame(columns=['subnet', 'asn', 'asn_desc', 'country', 'count'])
-    df = df.astype({
-        'subnet': 'string',
-        'asn': 'string',
-        'asn_desc': 'string',
-        'country': 'string',
-        'count': 'int64'
-    })
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_file = f'{OUTPUT_FILE_PREFIX}_{timestamp}.csv'
+    detailed_output = f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
+    checkpoint_file = f'{OUTPUT_FILE_PREFIX}_checkpoint_{timestamp}.txt'
+    
+    # Initialize or load progress
+    processed_subnets = set()
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, 'r') as f:
+            processed_subnets = set(f.read().splitlines())
     
     subnets, subnet_counts = get_unique_subnets(INPUT_FILE)
     total_subnets = len(subnets)
     
     print(f"Starting global network data collection for {total_subnets} unique subnets")
     
+    # Create CSV files with headers if they don't exist
+    if not os.path.exists(output_file):
+        pd.DataFrame(columns=['subnet', 'asn', 'asn_desc', 'country', 'count']).to_csv(output_file, index=False)
+    
+    if not os.path.exists(detailed_output):
+        with open(detailed_output, 'w') as outfile:
+            outfile.write("original_line,subnet,asn,asn_desc,country\n")
+    
     for idx, subnet in enumerate(subnets, 1):
+        if subnet in processed_subnets:
+            print(f"[{idx}/{total_subnets}] Skipping already processed subnet: {subnet}")
+            continue
+            
         print(f"[{idx}/{total_subnets}] Processing subnet: {subnet}")
         route_data = get_route_data(subnet)
         
@@ -204,41 +220,41 @@ def process_routes(check_missing=False):
                 
                 print(f"  → Retrieved ASN details: {holder}")
                 
-                df = pd.concat([df, pd.DataFrame([{
-                    'subnet': subnet,
-                    'asn': str(asn),
-                    'asn_desc': holder,
-                    'country': country,
-                    'count': subnet_counts[subnet]
-                }])], ignore_index=True)
+                # Write to summary file incrementally
+                with open(output_file, 'a') as f:
+                    pd.DataFrame([{
+                        'subnet': subnet,
+                        'asn': str(asn),
+                        'asn_desc': holder,
+                        'country': country,
+                        'count': subnet_counts[subnet]
+                    }]).to_csv(f, header=False, index=False)
+                
+                # Write to detailed file incrementally
+                with open(INPUT_FILE, 'r') as infile, open(detailed_output, 'a') as outfile:
+                    for line in infile:
+                        ip = line.split()[1]
+                        if ipaddress.ip_address(ip) in ipaddress.ip_network(subnet):
+                            outfile.write(f"{line.strip()},{subnet},{asn},{holder},{country}\n")
             else:
                 print(f"  → No routing data found for {subnet}")
+            
+            # Save checkpoint after each successful processing
+            with open(checkpoint_file, 'a') as f:
+                f.write(f"{subnet}\n")
+            processed_subnets.add(subnet)
+            
         except Exception as e:
             print(f"  → Error processing {subnet}: {str(e)}")
             continue
         
         time.sleep(RATE_LIMIT_DELAY/1000)
     
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = f'{OUTPUT_FILE_PREFIX}_{timestamp}.csv'
-    df.to_csv(output_file, index=False)
-    
-    detailed_output = f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
-    with open(INPUT_FILE, 'r') as infile, open(detailed_output, 'w') as outfile:
-        outfile.write("original_line,subnet,asn,asn_desc,country\n")
-        for line in infile:
-            ip = line.split()[1]
-            subnet = '.'.join(ip.split('.')[:2]) + '.0.0/16'
-            if subnet in df['subnet'].values:
-                subnet_data = df[df['subnet'] == subnet].iloc[0]
-                outfile.write(f"{line.strip()},{subnet},{subnet_data['asn']},{subnet_data['asn_desc']},{subnet_data['country']}\n")
-    
     if check_missing:
         print("\nChecking for missing ASN information...")
         df_detailed = pd.read_csv(detailed_output, dtype={'asn': str, 'asn_desc': str})
         df_summary = pd.read_csv(output_file, dtype={'asn': str, 'asn_desc': str})
         
-        # Clean any triple quotes in both dataframes
         df_detailed['asn_desc'] = df_detailed['asn_desc'].str.replace('"""', '"')
         df_summary['asn_desc'] = df_summary['asn_desc'].str.replace('"""', '"')
         
@@ -263,11 +279,9 @@ def process_routes(check_missing=False):
                     print(f"  → Found ASN: {asn}")
                     print(f"  → Description: {asn_desc}")
                     
-                    # Update detailed file
                     df_detailed.loc[index, 'asn'] = str(asn)
                     df_detailed.loc[index, 'asn_desc'] = str(asn_desc)
                     
-                    # Update summary file for matching subnet
                     summary_idx = df_summary[df_summary['subnet'] == subnet].index
                     if not summary_idx.empty:
                         df_summary.loc[summary_idx[0], 'asn'] = str(asn)
@@ -285,6 +299,10 @@ def process_routes(check_missing=False):
                 print("\nUpdated both detailed and summary outputs with new ASN information")
         else:
             print("No missing ASN entries found")
+    
+    # Clean up checkpoint file after successful completion
+    if os.path.exists(checkpoint_file):
+        os.remove(checkpoint_file)
     
     print(f"\nData collection complete!")
     print(f"Processed {total_subnets} unique subnets")
