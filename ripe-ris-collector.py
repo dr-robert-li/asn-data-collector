@@ -238,14 +238,18 @@ def process_routes(check_missing=False, use_checkpoint=False):
         checkpoint_files = find_checkpoint_files()
         if checkpoint_files:
             print("\nFound checkpoint files:")
+            print("0. Start new process (ignore checkpoints)")
             for idx, cf in enumerate(checkpoint_files, 1):
                 related = get_related_files(cf)
                 print(f"{idx}. {cf}")
                 print(f"   Related files: {related['summary']}, {related['detailed']}")
             
-            choice = int(input("\nEnter the number of the checkpoint file to continue with: ")) - 1
-            if 0 <= choice < len(checkpoint_files):
-                checkpoint_file = checkpoint_files[choice]
+            choice = int(input("\nEnter number (0 to start new): "))
+            if choice == 0:
+                print("\nStarting new process.")
+                processed_subnets = set()
+            elif 0 < choice <= len(checkpoint_files):
+                checkpoint_file = checkpoint_files[choice-1]
                 related_files = get_related_files(checkpoint_file)
                 output_file = related_files['summary']
                 detailed_output = related_files['detailed']
@@ -254,11 +258,12 @@ def process_routes(check_missing=False, use_checkpoint=False):
                     processed_subnets = set(f.read().splitlines())
                 print(f"\nContinuing from checkpoint: {checkpoint_file}")
                 print(f"Previously processed subnets: {len(processed_subnets)}")
+            else:
+                print("\nInvalid selection. Starting new process.")
+                processed_subnets = set()
         else:
             print("No checkpoint files found. Starting new process.")
             processed_subnets = set()
-    else:
-        processed_subnets = set()
     
     subnets, subnet_counts = get_unique_subnets(INPUT_FILE)
     total_subnets = len(subnets)
