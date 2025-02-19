@@ -1,4 +1,4 @@
-# RIPE RIS Data Collector
+# ASN Data Collector
 ### v1.0.0
 ### Robert Li
 
