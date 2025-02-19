@@ -2,7 +2,8 @@ import requests
 import pandas as pd
 import ipaddress
 from datetime import datetime
-import whois
+from ipwhois import IPWhois
+from ipwhois.exceptions import IPDefinedError, HTTPLookupError
 import time
 import socket
 import subprocess
@@ -108,27 +109,31 @@ def get_sample_ip_for_subnet(subnet, input_file):
                 return ip
     return None
 
-def query_rir_api(endpoint, subnet):
+def query_rir_api(endpoint, subnet, verbose=False):
     try:
         headers = {'Accept': 'application/json'}
         response = requests.get(f"{endpoint}{subnet}", headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json()
-        print(f"  → Status code {response.status_code} from {endpoint}")
+        if verbose:
+            print(f"  → Status code {response.status_code} from {endpoint}")
         return None
     except requests.Timeout:
-        print(f"  → Timeout while querying {endpoint}")
+        if verbose:
+            print(f"  → Timeout while querying {endpoint}")
         return None
     except requests.RequestException as e:
-        print(f"  → Error querying {endpoint}: {str(e)}")
+        if verbose:
+            print(f"  → Error querying {endpoint}: {str(e)}")
         return None
     except ValueError as e:
-        print(f"  → Invalid JSON from {endpoint}")
+        if verbose:
+            print(f"  → Invalid JSON from {endpoint}")
         return None
     finally:
         time.sleep(RATE_LIMIT_DELAY/1000)
 
-def get_route_data(subnet):
+def get_route_data(subnet, verbose=False):
     def is_valid_data(asn, holder):
         return asn and holder and asn.upper() != 'NA' and holder.upper() != 'NA' and holder != '""'
 
@@ -184,26 +189,38 @@ def get_route_data(subnet):
                             print(f"  → Found valid data via ARIN")
                             return {'data': {'asns': [{'asn': asn, 'holder': f'"{holder}"'}]}}
 
-    # Fallback to WHOIS lookup
-    print(f"  → Falling back to WHOIS lookup...")
+    # Fallback to RDAP/WHOIS lookup using ipwhois
+    print(f"  → Falling back to RDAP/WHOIS lookup...")
     sample_ip = get_sample_ip_for_subnet(subnet, INPUT_FILE)
     if sample_ip:
         try:
-            w = whois.whois(sample_ip)
-            if w.asn and w.org and is_valid_data(w.asn, w.org):
-                print(f"  → Found valid data via WHOIS")
-                return {
-                    'data': {
-                        'asns': [{
-                            'asn': w.asn,
-                            'holder': f'"{w.org}"'
-                        }]
+            print(f"  → Using sample IP: {sample_ip}")
+            obj = IPWhois(sample_ip)
+            results = obj.lookup_rdap()
+            
+            if results.get('asn') and results.get('network', {}).get('name'):
+                asn = results['asn']
+                holder = results['network']['name']
+                country = results.get('asn_country_code', '')
+                
+                if is_valid_data(asn, holder):
+                    print(f"  → Found valid data via RDAP")
+                    return {
+                        'data': {
+                            'asns': [{
+                                'asn': asn,
+                                'holder': f'"{holder}"',
+                                'country': country
+                            }]
+                        }
                     }
-                }
-        except:
-            pass
+        except (IPDefinedError, HTTPLookupError) as e:
+            if verbose:
+                print(f"  → RDAP lookup failed: {str(e)}")
+        except Exception as e:
+            if verbose:
+                print(f"  → Error during RDAP lookup: {str(e)}")
     
-    # Return NA values if no valid data found from any source
     print(f"  → No valid data found from any source")
     return {'data': {'asns': [{'asn': 'NA', 'holder': '"NA"'}]}}
 
@@ -229,11 +246,14 @@ def get_related_files(checkpoint_file):
         'detailed': f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
     }
 
-def process_routes(check_missing=False, use_checkpoint=False):
+def process_routes(check_missing=False, use_checkpoint=False, verbose=False):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_file = f'{OUTPUT_FILE_PREFIX}_{timestamp}.csv'
     detailed_output = f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
     checkpoint_file = f'{OUTPUT_FILE_PREFIX}_checkpoint_{timestamp}.txt'
+    
+    # Initialize processed_subnets set
+    processed_subnets = set()
     
     # Handle checkpoint selection if requested
     if use_checkpoint:
@@ -249,7 +269,6 @@ def process_routes(check_missing=False, use_checkpoint=False):
             choice = int(input("\nEnter number (0 to start new): "))
             if choice == 0:
                 print("\nStarting new process.")
-                processed_subnets = set()
             elif 0 < choice <= len(checkpoint_files):
                 checkpoint_file = checkpoint_files[choice-1]
                 related_files = get_related_files(checkpoint_file)
@@ -262,10 +281,8 @@ def process_routes(check_missing=False, use_checkpoint=False):
                 print(f"Previously processed subnets: {len(processed_subnets)}")
             else:
                 print("\nInvalid selection. Starting new process.")
-                processed_subnets = set()
         else:
             print("No checkpoint files found. Starting new process.")
-            processed_subnets = set()
     
     subnets, subnet_counts = get_unique_subnets(INPUT_FILE)
     total_subnets = len(subnets)
@@ -286,7 +303,7 @@ def process_routes(check_missing=False, use_checkpoint=False):
             continue
             
         print(f"[{idx}/{total_subnets}] Processing subnet: {subnet}")
-        route_data = get_route_data(subnet)
+        route_data = get_route_data(subnet, verbose)
         
         try:
             if route_data['data'].get('asns'):
@@ -324,7 +341,8 @@ def process_routes(check_missing=False, use_checkpoint=False):
             processed_subnets.add(subnet)
             
         except Exception as e:
-            print(f"  → Error processing {subnet}: {str(e)}")
+            if verbose:
+                print(f"  → Error processing {subnet}: {str(e)}")
             continue
         
         time.sleep(RATE_LIMIT_DELAY/1000)
@@ -368,7 +386,8 @@ def process_routes(check_missing=False, use_checkpoint=False):
                     
                     updated = True
                 else:
-                    print(f"  → No additional data found")
+                    if verbose:
+                        print(f"  → No additional data found")
                 
                 time.sleep(RATE_LIMIT_DELAY/1000)
             
@@ -393,6 +412,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--check-missing', action='store_true', help='Check and update missing ASN information')
     parser.add_argument('--checkpoint', action='store_true', help='Use existing checkpoint if available')
+    parser.add_argument('--verbose', action='store_true', help='Show detailed error messages and status codes')
     args = parser.parse_args()
     
-    process_routes(check_missing=args.check_missing, use_checkpoint=args.checkpoint)
+    process_routes(check_missing=args.check_missing, use_checkpoint=args.checkpoint, verbose=args.verbose)

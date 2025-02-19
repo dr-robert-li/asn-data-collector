@@ -1,5 +1,5 @@
 requests
 pandas
-python-whois
+ipwhois
 ipaddress
 dnspython
