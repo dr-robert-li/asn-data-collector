@@ -125,6 +125,8 @@ def query_rir_api(endpoint, subnet):
     except ValueError as e:
         print(f"  → Invalid JSON from {endpoint}")
         return None
+    finally:
+        time.sleep(RATE_LIMIT_DELAY/1000)
 
 def get_route_data(subnet):
     def is_valid_data(asn, holder):
