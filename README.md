@@ -56,6 +56,12 @@ Resume from checkpoint:
 python ripe-ris-collector.py --checkpoint
 ```
 
+Increase verbosity to include error messages:
+
+```bash
+python ripe-ris-collector.py --verbose
+```
+
 ## Input Format
 
 The script expects an input file (this can be specified inside the python script) with IP addresses in any format. It will extract valid IPs from each line.
