@@ -111,59 +111,99 @@ def get_sample_ip_for_subnet(subnet, input_file):
 def query_rir_api(endpoint, subnet):
     try:
         headers = {'Accept': 'application/json'}
-        response = requests.get(f"{endpoint}{subnet}", headers=headers)
-        return response.json()
-    except:
+        response = requests.get(f"{endpoint}{subnet}", headers=headers, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        print(f"  → Status code {response.status_code} from {endpoint}")
+        return None
+    except requests.Timeout:
+        print(f"  → Timeout while querying {endpoint}")
+        return None
+    except requests.RequestException as e:
+        print(f"  → Error querying {endpoint}: {str(e)}")
+        return None
+    except ValueError as e:
+        print(f"  → Invalid JSON from {endpoint}")
         return None
 
 def get_route_data(subnet):
+    def is_valid_data(asn, holder):
+        return asn and holder and asn.upper() != 'NA' and holder.upper() != 'NA' and holder != '""'
+
     # Try Team Cymru first
     cymru_data = query_team_cymru(subnet)
-    if cymru_data and cymru_data['data']['asns'][0]['asn'].upper() != 'NA':
+    if cymru_data and is_valid_data(cymru_data['data']['asns'][0]['asn'], cymru_data['data']['asns'][0].get('holder', '')):
         print(f"  → Found valid data via Team Cymru")
         return cymru_data
 
-    # Try each RIR's APIs if Team Cymru returned NA or failed
+    # Try each RIR's APIs
     print(f"  → Trying RIR APIs...")
     for rir, endpoints in ROUTING_APIS.items():
         for endpoint in endpoints:
             data = query_rir_api(endpoint, subnet)
             if data:
-                if rir == 'RIPE' and (data['data'].get('asns') or data['data'].get('announced')):
-                    print(f"  → Found data via RIPE")
-                    return data
-                elif rir == 'LACNIC' and data.get('networks'):
-                    print(f"  → Found data via LACNIC")
-                    return {'data': {'asns': [{'asn': data['networks'][0]['autnum']}]}}
-                elif rir == 'APNIC' and data.get('objects'):
-                    print(f"  → Found data via APNIC")
-                    return {'data': {'asns': [{'asn': data['objects'][0].get('handle')}]}}
-                elif rir == 'AFRINIC' and data.get('entities'):
-                    print(f"  → Found data via AFRINIC")
-                    return {'data': {'asns': [{'asn': data['entities'][0].get('handle')}]}}
-                elif rir == 'ARIN' and data.get('net'):
-                    print(f"  → Found data via ARIN")
-                    return {'data': {'asns': [{'asn': data['net'].get('originAS')}]}}
+                if rir == 'RIPE':
+                    if data.get('data', {}).get('asns'):
+                        asn = data['data']['asns'][0].get('asn', 'NA')
+                        holder = data['data']['asns'][0].get('holder', 'NA')
+                        if is_valid_data(asn, holder):
+                            print(f"  → Found valid data via RIPE")
+                            return {'data': {'asns': [{'asn': str(asn), 'holder': f'"{holder}"'}]}}
+                
+                elif rir == 'LACNIC':
+                    if data.get('entities'):
+                        asn = data['entities'][0].get('handle', 'NA').replace('AS', '')
+                        holder = data['entities'][0].get('name', 'NA')
+                        if is_valid_data(asn, holder):
+                            print(f"  → Found valid data via LACNIC")
+                            return {'data': {'asns': [{'asn': asn, 'holder': f'"{holder}"'}]}}
+                
+                elif rir == 'APNIC':
+                    if data.get('entities'):
+                        asn = data['entities'][0].get('handle', 'NA').replace('AS', '')
+                        holder = data['entities'][0].get('name', 'NA')
+                        if is_valid_data(asn, holder):
+                            print(f"  → Found valid data via APNIC")
+                            return {'data': {'asns': [{'asn': asn, 'holder': f'"{holder}"'}]}}
+                
+                elif rir == 'AFRINIC':
+                    if data.get('entities'):
+                        asn = data['entities'][0].get('handle', 'NA').replace('AS', '')
+                        holder = data['entities'][0].get('name', 'NA')
+                        if is_valid_data(asn, holder):
+                            print(f"  → Found valid data via AFRINIC")
+                            return {'data': {'asns': [{'asn': asn, 'holder': f'"{holder}"'}]}}
+                
+                elif rir == 'ARIN':
+                    if data.get('handle'):
+                        asn = data.get('originASNs', {}).get('originASN', [{}])[0].get('originAS', 'NA').replace('AS', '')
+                        holder = data.get('name', 'NA')
+                        if is_valid_data(asn, holder):
+                            print(f"  → Found valid data via ARIN")
+                            return {'data': {'asns': [{'asn': asn, 'holder': f'"{holder}"'}]}}
 
-    # Last resort: WHOIS lookup
-    print(f"  → Trying WHOIS lookup...")
+    # Fallback to WHOIS lookup
+    print(f"  → Falling back to WHOIS lookup...")
     sample_ip = get_sample_ip_for_subnet(subnet, INPUT_FILE)
     if sample_ip:
         try:
             w = whois.whois(sample_ip)
-            print(f"  → Found data via WHOIS")
-            return {
-                'data': {
-                    'asns': [{
-                        'asn': w.asn,
-                        'holder': f'"{w.org}"'
-                    }]
+            if w.asn and w.org and is_valid_data(w.asn, w.org):
+                print(f"  → Found valid data via WHOIS")
+                return {
+                    'data': {
+                        'asns': [{
+                            'asn': w.asn,
+                            'holder': f'"{w.org}"'
+                        }]
+                    }
                 }
-            }
         except:
             pass
     
-    return {'data': {}}
+    # Return NA values if no valid data found from any source
+    print(f"  → No valid data found from any source")
+    return {'data': {'asns': [{'asn': 'NA', 'holder': '"NA"'}]}}
 
 def get_asn_info(asn):
     for rir, endpoints in ROUTING_APIS.items():
@@ -176,17 +216,49 @@ def get_asn_info(asn):
             continue
     return {'data': {}}
 
-def process_routes(check_missing=False):
+def find_checkpoint_files():
+    checkpoint_files = [f for f in os.listdir('.') if f.startswith(f'{OUTPUT_FILE_PREFIX}_checkpoint_')]
+    return checkpoint_files
+
+def get_related_files(checkpoint_file):
+    timestamp = checkpoint_file.replace(f'{OUTPUT_FILE_PREFIX}_checkpoint_', '').replace('.txt', '')
+    return {
+        'summary': f'{OUTPUT_FILE_PREFIX}_{timestamp}.csv',
+        'detailed': f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
+    }
+
+def process_routes(check_missing=False, use_checkpoint=False):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_file = f'{OUTPUT_FILE_PREFIX}_{timestamp}.csv'
     detailed_output = f'{OUTPUT_FILE_PREFIX}_detailed_{timestamp}.csv'
     checkpoint_file = f'{OUTPUT_FILE_PREFIX}_checkpoint_{timestamp}.txt'
     
-    # Initialize or load progress
-    processed_subnets = set()
-    if os.path.exists(checkpoint_file):
-        with open(checkpoint_file, 'r') as f:
-            processed_subnets = set(f.read().splitlines())
+    # Handle checkpoint selection if requested
+    if use_checkpoint:
+        checkpoint_files = find_checkpoint_files()
+        if checkpoint_files:
+            print("\nFound checkpoint files:")
+            for idx, cf in enumerate(checkpoint_files, 1):
+                related = get_related_files(cf)
+                print(f"{idx}. {cf}")
+                print(f"   Related files: {related['summary']}, {related['detailed']}")
+            
+            choice = int(input("\nEnter the number of the checkpoint file to continue with: ")) - 1
+            if 0 <= choice < len(checkpoint_files):
+                checkpoint_file = checkpoint_files[choice]
+                related_files = get_related_files(checkpoint_file)
+                output_file = related_files['summary']
+                detailed_output = related_files['detailed']
+                
+                with open(checkpoint_file, 'r') as f:
+                    processed_subnets = set(f.read().splitlines())
+                print(f"\nContinuing from checkpoint: {checkpoint_file}")
+                print(f"Previously processed subnets: {len(processed_subnets)}")
+        else:
+            print("No checkpoint files found. Starting new process.")
+            processed_subnets = set()
+    else:
+        processed_subnets = set()
     
     subnets, subnet_counts = get_unique_subnets(INPUT_FILE)
     total_subnets = len(subnets)
@@ -313,6 +385,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--check-missing', action='store_true', help='Check and update missing ASN information')
+    parser.add_argument('--checkpoint', action='store_true', help='Use existing checkpoint if available')
     args = parser.parse_args()
     
-    process_routes(check_missing=args.check_missing)
+    process_routes(check_missing=args.check_missing, use_checkpoint=args.checkpoint)

@@ -1,17 +1,26 @@
 # ASN Data Collector
-### v1.0.0
+### v1.1.0
 ### Robert Li
 
 A Python script for collecting and analyzing network routing data from multiple sources including RIPE RIS, Team Cymru, and various RIR APIs.
 
 ## Features
 
-- Collects ASN and routing information from multiple authoritative sources
+- Collects ASN and routing information from multiple authoritative sources:
+  - Team Cymru
+  - RIPE NCC
+  - LACNIC
+  - APNIC
+  - AFRINIC
+  - ARIN
+  - WHOIS
 - Supports bulk IP processing
 - Rate-limited API calls
 - Detailed and summary CSV outputs
 - Missing ASN detection and correction
-- Progress tracking
+- Progress tracking with checkpoint recovery
+- Fallback logic between data sources
+
 
 ## Installation
 
@@ -39,6 +48,12 @@ Check and update missing ASN information:
 
 ```bash
 python ripe-ris-collector.py --check-missing
+```
+
+Resume from checkpoint:
+
+```bash
+python ripe-ris-collector.py --checkpoint
 ```
 
 ## Input Format
